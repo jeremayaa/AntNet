@@ -116,76 +116,150 @@ import cv2
 from scipy.ndimage import distance_transform_edt
 import matplotlib.pyplot as plt
 
-def compute_vector_field(mask_path):
+# def compute_vector_field(mask_path):
+#     """
+#     Given a binary mask image filepath, compute at each pixel a unit vector
+#     pointing towards the nearest "cell" pixel (mask==1).
+
+#     Args:
+#         mask_path (str): Path to a binary mask image (values 0/255 or 0/1).
+
+#     Returns:
+#         vf (np.ndarray): Array of shape (H, W, 2), where vf[y,x] = (vx, vy)
+#                          is the unit vector pointing from (x,y) to nearest cell.
+#     """
+#     # Load mask in grayscale
+#     mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+#     if mask is None:
+#         raise FileNotFoundError(f"Mask not found: {mask_path}")
+#     # Binarize (assuming cells are nonzero)
+#     bin_mask = (mask > 0).astype(np.uint8)
+
+#     # Compute Euclidean distance transform and indices of nearest foreground
+#     # dist: distance to nearest cell; indices: coordinates of that cell
+#     dist, inds = distance_transform_edt(1 - bin_mask,
+#                                         return_distances=True,
+#                                         return_indices=True)
+#     # inds has shape (2, H, W): first row is y_idx, second is x_idx
+#     y_idx, x_idx = inds
+
+#     H, W = bin_mask.shape
+#     # Create meshgrid of coordinates
+#     yy, xx = np.meshgrid(np.arange(H), np.arange(W), indexing='ij')
+
+#     # Vector from each pixel to its nearest cell pixel
+#     vec_y = y_idx - yy
+#     vec_x = x_idx - xx
+#     vec = np.stack((vec_x, vec_y), axis=-1).astype(np.float32)
+
+#     # Normalize to unit vectors; avoid division by zero
+#     norms = np.linalg.norm(vec, axis=-1, keepdims=True)
+#     # At cell centers (norms=0), leave vector as (0,0)
+#     norms[norms == 0] = 1.0
+#     vf = vec / norms
+#     return vf
+
+from scipy import ndimage
+def compute_vector_field(mask: np.ndarray) -> np.ndarray:
     """
-    Given a binary mask image filepath, compute at each pixel a unit vector
-    pointing towards the nearest "cell" pixel (mask==1).
-
-    Args:
-        mask_path (str): Path to a binary mask image (values 0/255 or 0/1).
-
-    Returns:
-        vf (np.ndarray): Array of shape (H, W, 2), where vf[y,x] = (vx, vy)
-                         is the unit vector pointing from (x,y) to nearest cell.
+    Given a binary mask (H×W), compute at each pixel a unit vector
+    pointing toward its nearest ‘1’-pixel (cell). Returns an H×W×2 array.
     """
-    # Load mask in grayscale
-    mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-    if mask is None:
-        raise FileNotFoundError(f"Mask not found: {mask_path}")
-    # Binarize (assuming cells are nonzero)
-    bin_mask = (mask > 0).astype(np.uint8)
-
-    # Compute Euclidean distance transform and indices of nearest foreground
-    # dist: distance to nearest cell; indices: coordinates of that cell
-    dist, inds = distance_transform_edt(1 - bin_mask,
-                                        return_distances=True,
-                                        return_indices=True)
-    # inds has shape (2, H, W): first row is y_idx, second is x_idx
-    y_idx, x_idx = inds
-
-    H, W = bin_mask.shape
-    # Create meshgrid of coordinates
-    yy, xx = np.meshgrid(np.arange(H), np.arange(W), indexing='ij')
-
-    # Vector from each pixel to its nearest cell pixel
-    vec_y = y_idx - yy
-    vec_x = x_idx - xx
-    vec = np.stack((vec_x, vec_y), axis=-1).astype(np.float32)
-
-    # Normalize to unit vectors; avoid division by zero
-    norms = np.linalg.norm(vec, axis=-1, keepdims=True)
-    # At cell centers (norms=0), leave vector as (0,0)
-    norms[norms == 0] = 1.0
-    vf = vec / norms
+    # distance transform + indices of nearest nonzero
+    distances, indices = ndimage.distance_transform_edt(
+        1 - mask,
+        return_distances=True,
+        return_indices=True
+    )
+    # indices is shape (2, H, W): row_idxs, col_idxs of nearest cell
+    nearest_y, nearest_x = indices
+    H, W = mask.shape
+    Y, X = np.meshgrid(np.arange(H), np.arange(W), indexing='ij')
+    vec_y = nearest_y - Y
+    vec_x = nearest_x - X
+    lengths = np.sqrt(vec_y**2 + vec_x**2)
+    # avoid divide by zero
+    lengths[lengths == 0] = 1.0
+    vf = np.stack([vec_x/lengths, vec_y/lengths], axis=-1)
     return vf
 
 
-def visualize_vector_field(vf, background=None, stride=16, scale=10):
-    """
-    Display a quiver plot of the vector field, optionally overlayed on a background image.
 
-    Args:
-        vf (np.ndarray): Vector field of shape (H, W, 2).
-        background (np.ndarray, optional): Grayscale or RGB image of shape (H, W) or (H, W, 3).
-        stride (int): Sampling stride for quiver arrows.
-        scale (float): Scaling factor for arrow length in the plot.
+def visualize_vector_field(vf: np.ndarray,
+                           background: np.ndarray = None,
+                           stride: int = 16,
+                           scale: float = 10.0):
     """
+    Plot a subsampled quiver of vf (H×W×2).  
+    If `background` is provided (H×W or H×W×3), show it behind arrows.
+    """
+    import matplotlib.pyplot as plt
+
     H, W, _ = vf.shape
-    yy, xx = np.meshgrid(np.arange(H), np.arange(W), indexing='ij')
+    ys = np.arange(0, H, stride)
+    xs = np.arange(0, W, stride)
+    Xg, Yg = np.meshgrid(xs, ys)
+    U = vf[Yg, Xg, 0]
+    V = vf[Yg, Xg, 1]
 
-    # Sample a grid for readability
-    yy_s = yy[::stride, ::stride]
-    xx_s = xx[::stride, ::stride]
-    u = vf[::stride, ::stride, 0]
-    v = vf[::stride, ::stride, 1]
-
-    plt.figure(figsize=(8, 8))
+    plt.figure(figsize=(6,6))
     if background is not None:
         if background.ndim == 2:
-            plt.imshow(background, cmap='gray', origin='upper')
+            plt.imshow(background, cmap='gray', alpha=0.5)
         else:
-            plt.imshow(background, origin='upper')
-    plt.quiver(xx_s, yy_s, u, v, angles='xy', scale_units='xy', scale=1/scale, color='r', width=0.002)
+            plt.imshow(background, alpha=0.5)
+    plt.quiver(
+        Xg, Yg, U, V,
+        angles='xy', scale_units='xy', scale=1/scale, width=0.002
+    )
     plt.axis('off')
     plt.tight_layout()
     plt.show()
+
+
+
+
+
+
+# importing and managing jpeg images
+def load_image(path: str) -> np.ndarray:
+    """Load an RGB image from disk as an H×W×3 array."""
+    img = cv2.imread(path, cv2.IMREAD_COLOR)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    return img
+
+
+def load_mask(path: str) -> np.ndarray:
+    """Load a binary mask (0/1) from disk as an H×W array."""
+    mask = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+    _, bin_mask = cv2.threshold(mask, 127, 1, cv2.THRESH_BINARY)
+    return bin_mask
+
+
+def extract_patch(image: np.ndarray,
+                  center: tuple[int,int],
+                  patch_size: tuple[int,int]) -> np.ndarray:
+    """
+    Crop a patch of size patch_size (h,w) centered at (x,y).
+    Pads with zeros if near the border.
+    """
+    h, w = image.shape[:2]
+    ph, pw = patch_size
+    x, y = center
+
+    x1 = max(0, x - pw//2)
+    y1 = max(0, y - ph//2)
+    x2 = min(w, x1 + pw)
+    y2 = min(h, y1 + ph)
+
+    patch = image[y1:y2, x1:x2]
+    # pad if needed
+    pad_h = ph - patch.shape[0]
+    pad_w = pw - patch.shape[1]
+    if pad_h > 0 or pad_w > 0:
+        patch = np.pad(
+            patch,
+            ((0, pad_h), (0, pad_w), (0, 0)),
+            mode='constant', constant_values=0
+        )
+    return patch
