@@ -1,0 +1,16 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*.so
+
+# Environments
+.python-version
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Data folders
+data/
+
