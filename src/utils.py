@@ -223,15 +223,18 @@ def visualize_vector_field(vf: np.ndarray,
 
 # importing and managing jpeg images
 def load_image(path: str) -> np.ndarray:
-    """Load an RGB image from disk as an H×W×3 array."""
+    """Load an RGB image or raise a clear error if not found."""
     img = cv2.imread(path, cv2.IMREAD_COLOR)
+    if img is None:
+        raise FileNotFoundError(f"Could not load image at '{path}'")
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     return img
 
 
 def load_mask(path: str) -> np.ndarray:
-    """Load a binary mask (0/1) from disk as an H×W array."""
     mask = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+    if mask is None:
+        raise FileNotFoundError(f"Could not load mask at '{path}'")
     _, bin_mask = cv2.threshold(mask, 127, 1, cv2.THRESH_BINARY)
     return bin_mask
 
