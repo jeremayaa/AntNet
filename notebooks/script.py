@@ -11,7 +11,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # ─── Project setup ─────────────────────────────────────────────────────────────
-SCRIPT_DIR   = Path(__file__).resolve().parent        # .../AntNet/notebooks
+SCRIPT_DIR   = Path(__file__).resolve().parent        # e.g. .../AntNet/notebooks
 PROJECT_ROOT = SCRIPT_DIR.parent                      # .../AntNet
 SRC_PATH     = PROJECT_ROOT / 'src'
 sys.path.insert(0, str(SRC_PATH))
@@ -23,10 +23,11 @@ from model      import AntModel
 # ─── Hyper-parameters ─────────────────────────────────────────────────────────
 N_AGENTS       = 1
 LOG_INTERVAL   = 10
-IMAGE_INTERVAL = 100
-MAX_ENERGY     = 10000
-INITIAL_ENERGY = 5000
-EVAL_STEPS     = 50   # rollout length for snapshots
+IMAGE_INTERVAL = 500
+MAX_ENERGY     = 5000
+INITIAL_ENERGY = 100
+EVAL_STEPS     = 500    # rollout length for snapshots
+MUTATION_STD   = 0.02  # standard deviation for Gaussian weight mutations
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -69,11 +70,12 @@ def compute_iou(mask: np.ndarray, trajectory: list[tuple[int,int]], kernel_size:
 
 
 class Agent:
+    """Wraps AntEnv + AntModel + optimizer + energy counter + turn bonus."""
     def __init__(self, img, mask, vf, device):
         self.env    = AntEnv(img, mask, vf,
                              kernel_size=(16,16),
-                             memory_len=10,
-                             max_steps=1000,
+                             memory_len=20,
+                             max_steps=500,
                              boundary='torus')
         self.model  = AntModel(
             in_channels=3,
@@ -84,6 +86,7 @@ class Agent:
         ).to(device)
         self.opt    = optim.Adam(self.model.parameters(), lr=1e-4)
         self.energy = INITIAL_ENERGY
+
         self.obs_patch, self.mem = self.env.reset()
         self.prev_act_unit = None
 
@@ -102,8 +105,8 @@ class Agent:
         self.energy += occ_r
 
         dx, dy = self.env.actions[int(action.item())]
-        act_vec = torch.tensor([dx, dy], dtype=torch.float32, device=device)
-        act_unit = act_vec / (act_vec.norm() + 1e-8)
+        act_vec   = torch.tensor([dx, dy], dtype=torch.float32, device=device)
+        act_unit  = act_vec / (act_vec.norm() + 1e-8)
         if self.prev_act_unit is not None:
             turn_bonus = (1.0 - torch.dot(act_unit, self.prev_act_unit)).item()
         else:
@@ -111,7 +114,8 @@ class Agent:
         self.prev_act_unit = act_unit
 
         r_total = cosine_r + occ_r + 0.1 * turn_bonus
-        loss = - (logp * r_total + 0.5 * entropy)
+        loss    = - (logp * r_total + 0.5 * entropy)
+
         self.opt.zero_grad()
         loss.backward()
         self.opt.step()
@@ -121,18 +125,15 @@ class Agent:
 
 def snapshot_and_log(agents, dataset, device, step, out_dir, iou_writer):
     """
-    Pick a random slide, evaluate all agents on it, save image with mask & paths,
+    Pick a random slide, evaluate agents on it, save image with mask & paths,
     compute per-agent IoUs, log them.
     """
-    # 1) choose random slide
     img, mask, vf = random.choice(dataset)
 
-    # 2) prepare plot
     fig, ax = plt.subplots(figsize=(6,6))
-    ax.imshow(img, alpha=0.6)
-    ax.imshow(mask, cmap='Reds', alpha=0.3)  # semi-transparent mask
+    ax.imshow(img, alpha=1)
+    ax.imshow(mask, cmap='Reds', alpha=0.2)
 
-    # 3) rollout each agent
     ious = []
     for ag in agents:
         eval_env = AntEnv(img, mask, vf,
@@ -157,10 +158,8 @@ def snapshot_and_log(agents, dataset, device, step, out_dir, iou_writer):
             alpha = 0.1 + 0.9 * (t/(T-1))
             ax.scatter(x, y, s=8, color='blue', alpha=alpha)
 
-        iou = compute_iou(mask, traj, eval_env.kernel_size)
-        ious.append(iou)
+        ious.append(compute_iou(mask, traj, eval_env.kernel_size))
 
-    # 4) title and save
     title = f"Step {step} | IoUs: " + ", ".join(f"{iou:.2f}" for iou in ious)
     ax.set_title(title)
     os.makedirs(out_dir, exist_ok=True)
@@ -168,7 +167,6 @@ def snapshot_and_log(agents, dataset, device, step, out_dir, iou_writer):
     fig.savefig(fname, bbox_inches='tight', pad_inches=0)
     plt.close(fig)
 
-    # 5) log IoUs
     iou_writer.writerow([step] + ious)
 
 
@@ -180,8 +178,8 @@ def main():
     img_paths  = sorted(imgs_dir.glob('*.jpg'), key=lambda p: int(p.stem))
     mask_paths = sorted(masks_dir.glob('*.jpg'), key=lambda p: int(p.stem))
     pairs = list(zip(img_paths, mask_paths))
-    if len(pairs) > 20:
-        pairs = random.sample(pairs, 20)
+    if len(pairs) > 100:
+        pairs = random.sample(pairs, 100)
 
     dataset = []
     for ip, mp in pairs:
@@ -190,15 +188,15 @@ def main():
         vf  = compute_vector_field(mk)
         dataset.append((im, mk, vf))
 
-    # prepare output dirs & logs
+    # prepare outputs
     Agents_DIR = PROJECT_ROOT/'Agents'
     Images_DIR = PROJECT_ROOT/'images_history'
     Agents_DIR.mkdir(exist_ok=True)
     Images_DIR.mkdir(exist_ok=True)
 
-    en_log = PROJECT_ROOT/'Energies_log.csv'
+    en_log  = PROJECT_ROOT/'Energies_log.csv'
     iou_log = PROJECT_ROOT/'IoU_log.csv'
-    with open(en_log, 'w', newline='') as f:
+    with open(en_log,  'w', newline='') as f:
         csv.writer(f).writerow(['step'] + [f'agent_{i}' for i in range(N_AGENTS)])
     with open(iou_log, 'w', newline='') as f:
         csv.writer(f).writerow(['step'] + [f'agent_{i}' for i in range(N_AGENTS)])
@@ -222,11 +220,25 @@ def main():
                 for i, ag in enumerate(agents):
                     ag.step_and_learn(DEVICE)
                     best_energy = max(best_energy, ag.energy)
+
+                    # mutate instead of kill
                     if ag.energy <= 0:
-                        im, mk, vf = random.choice(dataset)
-                        agents[i] = Agent(im, mk, vf, DEVICE)
+                        ag.energy = INITIAL_ENERGY
+                        # Gaussian mutation
+                        for p in ag.model.parameters():
+                            p.data += torch.randn_like(p.data) * MUTATION_STD
+                        # assign new slide & reset env
+                        im2, mk2, vf2 = random.choice(dataset)
+                        ag.env = AntEnv(im2, mk2, vf2,
+                                        kernel_size=(16,16),
+                                        memory_len=10,
+                                        max_steps=1000,
+                                        boundary='torus')
+                        ag.obs_patch, ag.mem = ag.env.reset()
+                        ag.prev_act_unit = None
+
                     if ag.energy >= MAX_ENERGY:
-                        print(f"🏆 Agent {i} reached {ag.energy} at step {global_step}!")
+                        print(f"🏆 Agent {i} reached {ag.energy} energy at step {global_step}!")
                         raise StopIteration
 
                 if global_step % LOG_INTERVAL == 0:
@@ -236,7 +248,7 @@ def main():
                     ef.flush()
 
                 if global_step % IMAGE_INTERVAL == 0:
-                    print(f"[Step {global_step:05d}] Generating snapshot and IoUs")
+                    print(f"[Step {global_step:05d}] Snapshot & IoU")
                     snapshot_and_log(agents, dataset, DEVICE,
                                      global_step, Images_DIR, iou_writer)
                     iof.flush()
@@ -249,6 +261,7 @@ def main():
             torch.save(ag.model.state_dict(),
                        Agents_DIR/f'agent_{idx}_step{global_step}.pth')
         print(f"💾 Saved all {len(agents)} agents to {Agents_DIR}")
+
 
 if __name__ == '__main__':
     main()
