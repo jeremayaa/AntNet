@@ -19,55 +19,124 @@ def combine_semantic_masks(masks: np.ndarray) -> np.ndarray:
     # any(..., axis=-1, keepdims=True) collapses 5 → 1
     return np.any(masks[..., :5], axis=-1, keepdims=True).astype(np.uint8)
 
-
+import math
+import math
+import numpy as np
+import matplotlib.pyplot as plt
+import numpy as np
 import matplotlib.pyplot as plt
 
-def plot_image_and_mask(images: np.ndarray, masks: np.ndarray, idx: int) -> None:
+def show_n_images(image_grid, titles=None, cmaps=None, figsize=None):
     """
-    Plot the idx-th RGB image and its corresponding binary mask side by side.
-    If masks has 6 channels, it will first OR together the first 5 channels.
+    Display a 2D grid of images, leaving None entries as blank cells.
 
     Parameters
     ----------
-    images : np.ndarray
-        Array of shape (N, H, W, 3) with RGB images.
-    masks : np.ndarray
-        Array of shape (N, H, W, 6), (N, H, W, 1), or (N, H, W) with masks.
-    idx : int
-        Index of the image/mask pair to plot.
-
-    Returns
-    -------
-    None
+    image_grid : list of list of array-like or None
+        image_grid[i][j] is either an image array to show, or None to leave blank.
+    titles : list of list of str, optional
+    cmaps : list of list of str or None, optional
+    figsize : tuple (width, height), optional
     """
-    img = images[idx]
-    if img.ndim != 3 or img.shape[-1] != 3:
-        raise ValueError(f"Expected images[...,3], got shape {img.shape}")
+    # grid dimensions
+    n_rows = len(image_grid)
+    if n_rows == 0:
+        raise ValueError("image_grid must have at least one row")
+    n_cols = max(len(row) for row in image_grid)
+    if n_cols == 0:
+        raise ValueError("Each row must have at least one column")
 
-    m = masks[idx]
-    # collapse 6-channel → (H,W)
-    if m.ndim == 3 and m.shape[-1] == 6:
-        m = np.any(m[..., :5], axis=-1)
-    # drop singleton channel
-    elif m.ndim == 3 and m.shape[-1] == 1:
-        m = m[..., 0]
-    # now m should be 2D
-    if m.ndim != 2:
-        raise ValueError(f"Could not interpret mask shape {m.shape}")
-    
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8, 4))
-    ax1.imshow(img.astype('uint8'))
-    ax1.set_title(f"Image {idx}")
-    ax1.axis('off')
+    # default size
+    if figsize is None:
+        figsize = (4 * n_cols, 4 * n_rows)
 
-    ax2.imshow(m, cmap='gray', vmin=0, vmax=1)
-    ax2.set_title(f"Mask {idx}")
-    ax2.axis('off')
+    # pad titles/cmaps to the same shape
+    if titles is None:
+        titles = [[None]*len(row) for row in image_grid]
+    if cmaps is None:
+        cmaps = [[None]*len(row) for row in image_grid]
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
+    axes = np.atleast_2d(axes)  # ensure 2D
+
+    for i in range(n_rows):
+        for j in range(n_cols):
+            ax = axes[i, j]
+            # if this cell exists and is not None, plot it
+            if j < len(image_grid[i]) and image_grid[i][j] is not None:
+                img = image_grid[i][j]
+                cmap = cmaps[i][j] if j < len(cmaps[i]) else None
+                title = titles[i][j] if j < len(titles[i]) else None
+
+                ax.imshow(img, cmap=cmap)
+                ax.axis('off')
+                if title:
+                    ax.set_title(title)
+            else:
+                # either out of bounds or explicitly None: leave blank
+                ax.axis('off')
 
     plt.tight_layout()
     plt.show()
 
 
+from scipy.ndimage import binary_erosion
+
+def extract_internal_edges(binary_mask: np.ndarray, erosion_iters: int = 1) -> np.ndarray:
+    """
+    Extracts internal edges of blobs in a binary mask using morphological erosion.
+
+    Parameters:
+        binary_mask (np.ndarray): Binary input mask (values should be 0 or 1).
+        erosion_iters (int): Number of erosion iterations.
+
+    Returns:
+        np.ndarray: Binary mask containing only the internal edges.
+    """
+    if binary_mask.dtype != bool:
+        binary_mask = binary_mask.astype(bool)
+    
+    # Perform erosion
+    eroded_mask = binary_erosion(binary_mask, iterations=erosion_iters)
+    
+    # Subtract eroded mask from original to get internal edge
+    internal_edges = binary_mask & ~eroded_mask
+
+    return internal_edges.astype(np.uint8)
+
+
+
+
+
+def make_heatmap_from_mask(binary_mask: np.ndarray) -> np.ndarray:
+    """
+    Creates a heatmap from a binary mask where the center of each blob has the highest value.
+    Values increase toward the center of the cell, with boundaries = 1, next layer = 2, ..., center = N.
+
+    Parameters:
+        binary_mask (np.ndarray): Binary input mask (values 0 or 1).
+
+    Returns:
+        np.ndarray: Heatmap with increasing intensity toward the center of blobs.
+    """
+    if binary_mask.dtype != bool:
+        binary_mask = binary_mask.astype(bool)
+
+    heatmap = np.zeros_like(binary_mask, dtype=np.uint16)
+    current_mask = binary_mask.copy()
+    layer_value = 1
+
+    while np.any(current_mask):
+        eroded = binary_erosion(current_mask)
+        edge_layer = current_mask & ~eroded
+        heatmap[edge_layer] = layer_value
+        current_mask = eroded
+        layer_value += 1
+
+    return heatmap
+
+
+import matplotlib.pyplot as plt
 import os
 from PIL import Image
 
@@ -116,74 +185,187 @@ import cv2
 from scipy.ndimage import distance_transform_edt
 import matplotlib.pyplot as plt
 
-# def compute_vector_field(mask_path):
-#     """
-#     Given a binary mask image filepath, compute at each pixel a unit vector
-#     pointing towards the nearest "cell" pixel (mask==1).
-
-#     Args:
-#         mask_path (str): Path to a binary mask image (values 0/255 or 0/1).
-
-#     Returns:
-#         vf (np.ndarray): Array of shape (H, W, 2), where vf[y,x] = (vx, vy)
-#                          is the unit vector pointing from (x,y) to nearest cell.
-#     """
-#     # Load mask in grayscale
-#     mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-#     if mask is None:
-#         raise FileNotFoundError(f"Mask not found: {mask_path}")
-#     # Binarize (assuming cells are nonzero)
-#     bin_mask = (mask > 0).astype(np.uint8)
-
-#     # Compute Euclidean distance transform and indices of nearest foreground
-#     # dist: distance to nearest cell; indices: coordinates of that cell
-#     dist, inds = distance_transform_edt(1 - bin_mask,
-#                                         return_distances=True,
-#                                         return_indices=True)
-#     # inds has shape (2, H, W): first row is y_idx, second is x_idx
-#     y_idx, x_idx = inds
-
-#     H, W = bin_mask.shape
-#     # Create meshgrid of coordinates
-#     yy, xx = np.meshgrid(np.arange(H), np.arange(W), indexing='ij')
-
-#     # Vector from each pixel to its nearest cell pixel
-#     vec_y = y_idx - yy
-#     vec_x = x_idx - xx
-#     vec = np.stack((vec_x, vec_y), axis=-1).astype(np.float32)
-
-#     # Normalize to unit vectors; avoid division by zero
-#     norms = np.linalg.norm(vec, axis=-1, keepdims=True)
-#     # At cell centers (norms=0), leave vector as (0,0)
-#     norms[norms == 0] = 1.0
-#     vf = vec / norms
-#     return vf
 
 from scipy import ndimage
-def compute_vector_field(mask: np.ndarray) -> np.ndarray:
+
+def compute_vector_field(mask: np.ndarray,
+                                  sigma: float = 2.0,
+                                  eps: float = 1e-8) -> np.ndarray:
     """
-    Given a binary mask (H×W), compute at each pixel a unit vector
-    pointing toward its nearest ‘1’-pixel (cell). Returns an H×W×2 array.
+    Compute the usual nearest‐cell unit vector field, then smooth it
+    with a Gaussian kernel and renormalize.
+
+    Parameters
+    ----------
+    mask : (H, W) array of {0,1}
+        Binary mask defining the ‘1’-pixels (cells).
+    sigma : float
+        Standard deviation of the Gaussian smoothing (in pixels).
+    eps : float
+        Tiny constant to avoid divide‐by‐zero when renormalizing.
+
+    Returns
+    -------
+    sm_vf : (H, W, 2) float
+        At each pixel, a unit vector pointing toward the nearest cell—
+        but smoothed across space to remove the grid‐artifact “stalactites.”
     """
-    # distance transform + indices of nearest nonzero
+    # 1) raw nearest‐cell field
     distances, indices = ndimage.distance_transform_edt(
         1 - mask,
         return_distances=True,
         return_indices=True
     )
-    # indices is shape (2, H, W): row_idxs, col_idxs of nearest cell
     nearest_y, nearest_x = indices
     H, W = mask.shape
     Y, X = np.meshgrid(np.arange(H), np.arange(W), indexing='ij')
-    vec_y = nearest_y - Y
-    vec_x = nearest_x - X
-    lengths = np.sqrt(vec_y**2 + vec_x**2)
-    # avoid divide by zero
+    vy = nearest_y - Y
+    vx = nearest_x - X
+    lengths = np.sqrt(vx**2 + vy**2)
     lengths[lengths == 0] = 1.0
-    vf = np.stack([vec_x/lengths, vec_y/lengths], axis=-1)
-    return vf
+    vf_x = vx / lengths
+    vf_y = vy / lengths
+
+    # 2) Gaussian‐smooth each component
+    sf_x = ndimage.gaussian_filter(vf_x, sigma=sigma, mode='nearest')
+    sf_y = ndimage.gaussian_filter(vf_y, sigma=sigma, mode='nearest')
+
+    # 3) renormalize to unit length
+    mag = np.sqrt(sf_x**2 + sf_y**2)
+    mag = np.where(mag < eps, 1.0, mag)
+    sf_x /= mag
+    sf_y /= mag
+
+    # stack and return
+    sm_vf = np.stack([sf_x, sf_y], axis=-1)
+    return sm_vf
 
 
+def compute_inverse_vector_field(mask: np.ndarray,
+                                          sigma: float = 2.0,
+                                          eps: float = 1e-8) -> np.ndarray:
+    """
+    Compute the inverse vector field (pointing from cell→background) and then
+    smooth it with a Gaussian kernel, renormalizing to unit length.
+
+    Parameters
+    ----------
+    mask : (H, W) array of {0,1}
+        Binary mask where 1=cells, 0=background.
+    sigma : float
+        Gaussian smoothing sigma (in pixels).
+    eps : float
+        Small constant to avoid division‐by‐zero during renormalization.
+
+    Returns
+    -------
+    sm_inv_vf : (H, W, 2) float
+        At each cell‐pixel, a unit vector pointing toward the nearest background—
+        but smoothed to remove jagged artifacts. Background pixels are (0,0).
+    """
+    # 1) raw inverse field
+    distances, indices = ndimage.distance_transform_edt(
+        mask,
+        return_distances=True,
+        return_indices=True
+    )
+    nearest_y, nearest_x = indices
+    H, W = mask.shape
+    Y, X = np.meshgrid(np.arange(H), np.arange(W), indexing='ij')
+    vy = nearest_y - Y
+    vx = nearest_x - X
+    lengths = np.sqrt(vx**2 + vy**2)
+    lengths[lengths == 0] = 1.0
+    inv_vf_x = vx / lengths
+    inv_vf_y = vy / lengths
+
+    # zero‐out background
+    inv_vf_x[mask == 0] = 0
+    inv_vf_y[mask == 0] = 0
+
+    # 2) smooth each component
+    sf_x = ndimage.gaussian_filter(inv_vf_x, sigma=sigma, mode='nearest')
+    sf_y = ndimage.gaussian_filter(inv_vf_y, sigma=sigma, mode='nearest')
+
+    # 3) renormalize to unit length
+    mag = np.sqrt(sf_x**2 + sf_y**2)
+    mag = np.where(mag < eps, 1.0, mag)
+    sf_x /= mag
+    sf_y /= mag
+
+    # 4) zero‐out background again (smoothing can bleed)
+    sf_x[mask == 0] = 0
+    sf_y[mask == 0] = 0
+
+    # stack and return
+    sm_inv_vf = np.stack([sf_x, sf_y], axis=-1)
+    return sm_inv_vf
+
+
+import numpy as np
+from scipy.ndimage import binary_erosion
+from utils import compute_inverse_vector_field, extract_internal_edges
+
+def compute_tangent_field(mask: np.ndarray,
+                                   erosion_iters: int = 1,
+                                   sigma: float = 2.0,
+                                   eps: float = 1e-8) -> np.ndarray:
+    """
+    Compute a smooth tangent field along the internal edges of `mask` by
+    Gaussian‐smoothing the outward normals before rotating them +90°.
+
+    Parameters
+    ----------
+    mask : (H,W) bool or {0,1}
+        Binary mask of cells.
+    erosion_iters : int
+        How many erosions for extracting the internal edge.
+    sigma : float
+        Standard deviation for the Gaussian filter (in pixels).
+    eps : float
+        Small constant to avoid division by zero.
+
+    Returns
+    -------
+    tangent_field : (H,W,2) float
+        At each edge pixel a unit‐length tangent vector; elsewhere (0,0).
+    """
+    # 1) get outward normals everywhere
+    normal_field = compute_inverse_vector_field(mask)   # shape (H,W,2)
+    nx = normal_field[..., 0]
+    ny = normal_field[..., 1]
+
+    # 2) extract edge mask
+    edges = extract_internal_edges(mask, erosion_iters=erosion_iters).astype(float)
+
+    # 3) mask the normals, then smooth both normals & mask
+    nx_masked = nx * edges
+    ny_masked = ny * edges
+
+    # gaussian smoothing
+    smooth_nx_num = ndimage.gaussian_filter(nx_masked, sigma=sigma, mode='nearest')
+    smooth_ny_num = ndimage.gaussian_filter(ny_masked, sigma=sigma, mode='nearest')
+    smooth_den    = ndimage.gaussian_filter(edges, sigma=sigma, mode='nearest')
+
+    # avoid divide‐by‐zero
+    smooth_den = np.maximum(smooth_den, eps)
+
+    # 4) normalized, smoothed normals
+    snx = smooth_nx_num / smooth_den
+    sny = smooth_ny_num / smooth_den
+    lengths = np.sqrt(snx**2 + sny**2)
+    lengths[lengths == 0] = 1.0
+    snx /= lengths
+    sny /= lengths
+
+    # 5) rotate +90° to get tangents, zero‐out non‐edges
+    H, W = mask.shape
+    tangent_field = np.zeros((H, W, 2), dtype=float)
+    # t = R90(n) = (-n_y, n_x)
+    tangent_field[..., 0] = -sny * (edges > 0)
+    tangent_field[..., 1] =  snx * (edges > 0)
+
+    return tangent_field
 
 def visualize_vector_field(vf: np.ndarray,
                            background: np.ndarray = None,

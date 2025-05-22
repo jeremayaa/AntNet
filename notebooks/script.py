@@ -76,7 +76,7 @@ class Agent:
                              kernel_size=(16,16),
                              memory_len=20,
                              max_steps=500,
-                             boundary='torus')
+                             boundary='clip')
         self.model  = AntModel(
             in_channels=3,
             patch_size=(16,16),
@@ -102,7 +102,7 @@ class Agent:
 
         in_cell = self.env.is_in_cell()
         occ_r   = 1 if in_cell else -1
-        self.energy += occ_r
+        
 
         dx, dy = self.env.actions[int(action.item())]
         act_vec   = torch.tensor([dx, dy], dtype=torch.float32, device=device)
@@ -114,6 +114,7 @@ class Agent:
         self.prev_act_unit = act_unit
 
         r_total = cosine_r + occ_r + 0.1 * turn_bonus
+        self.energy += r_total
         loss    = - (logp * r_total + 0.5 * entropy)
 
         self.opt.zero_grad()
